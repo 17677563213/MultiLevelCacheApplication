@@ -1,0 +1,56 @@
+server:
+  port: 8081
+
+spring:
+  redis:
+    host: 127.0.0.1
+    port: 6379
+    database: 0
+    timeout: 30000
+    lettuce:
+      pool:
+        max-active: 8
+        max-wait: -1
+        max-idle: 8
+        min-idle: 0
+      shutdown-timeout: 30000
+
+jetcache:
+  statIntervalMinutes: 15
+  areaInCacheName: false
+  local:
+    default:
+      type: caffeine
+      keyConvertor: fastjson
+      limit: 100
+      expireAfterWriteInMillis: 100000
+  remote:
+    default:
+      type: redis
+      keyConvertor: fastjson
+      valueEncoder: java
+      valueDecoder: java
+      poolConfig:
+        minIdle: 5
+        maxIdle: 20
+        maxTotal: 50
+      host: ${spring.redis.host}
+      port: ${spring.redis.port}
+      expireAfterWriteInMillis: 100000
+      timeout: 30000
+
+caffeine:
+  cache:
+    maximum-size: 100
+    expire-after-write: 60000
+
+redisson:
+  config:
+    singleServerConfig:
+      address: redis://${spring.redis.host}:${spring.redis.port}
+      timeout: 30000
+      subscriptionConnectionPoolSize: 50
+      connectionPoolSize: 64
+      subscriptionConnectionMinimumIdleSize: 1
+      connectionMinimumIdleSize: 24
+      subscriptionConnectionTimeout: 30000
