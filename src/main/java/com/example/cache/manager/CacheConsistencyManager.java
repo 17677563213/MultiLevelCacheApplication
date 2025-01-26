@@ -7,10 +7,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.cache.CacheManager;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
-
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -35,13 +33,6 @@ public class CacheConsistencyManager {
      */
     @Autowired
     private RedissonClient redissonClient;
-
-    /**
-     * Caffeine缓存管理器
-     * 用于管理Caffeine缓存
-     */
-    @Autowired
-    private CacheManager caffeineCacheManager;
 
     /**
      * 本地缓存实例
@@ -76,10 +67,8 @@ public class CacheConsistencyManager {
      * @param value 缓存值
      */
     public void updateCache(String key, Object value) {
-        // 获取分布式锁
         RLock lock = redissonClient.getLock(LOCK_PREFIX + key);
         try {
-            // 尝试获取锁
             if (lock.tryLock(5, 30, TimeUnit.SECONDS)) {
                 try {
                     // 更新各级缓存
@@ -87,12 +76,10 @@ public class CacheConsistencyManager {
                     // 发布缓存更新消息
                     publishCacheUpdateMessage(key, "update");
                 } finally {
-                    // 释放锁
                     lock.unlock();
                 }
             }
         } catch (InterruptedException e) {
-            // 获取锁失败，记录日志并中断线程
             log.error("获取锁失败", e);
             Thread.currentThread().interrupt();
         }
@@ -104,10 +91,8 @@ public class CacheConsistencyManager {
      * @param key 要删除的缓存键
      */
     public void deleteCache(String key) {
-        // 获取分布式锁
         RLock lock = redissonClient.getLock(LOCK_PREFIX + key);
         try {
-            // 尝试获取锁
             if (lock.tryLock(5, 30, TimeUnit.SECONDS)) {
                 try {
                     // 清除各级缓存
@@ -115,12 +100,10 @@ public class CacheConsistencyManager {
                     // 发布缓存删除消息
                     publishCacheUpdateMessage(key, "delete");
                 } finally {
-                    // 释放锁
                     lock.unlock();
                 }
             }
         } catch (InterruptedException e) {
-            // 获取锁失败，记录日志并中断线程
             log.error("获取锁失败", e);
             Thread.currentThread().interrupt();
         }
@@ -133,8 +116,8 @@ public class CacheConsistencyManager {
      * @param key 要清除的缓存键
      */
     public void clearLocalCache(String key) {
-        // 清除本地缓存
         jetcacheLocal.remove(key);
+        log.info("Local cache cleared for key: {}", key);
     }
 
     /**
@@ -144,19 +127,11 @@ public class CacheConsistencyManager {
      * @param value 缓存值
      */
     private void updateAllCaches(String key, Object value) {
-        // 更新Redis
-        redisTemplate.opsForValue().set(key, value);
-        
-        // 更新Caffeine缓存
-        org.springframework.cache.Cache caffeineCache = caffeineCacheManager.getCache("default");
-        if (caffeineCache != null) {
-            caffeineCache.put(key, value);
-        }
-        
-        // 更新JetCache本地缓存
+        // 更新本地缓存
         jetcacheLocal.put(key, value);
-        // 更新JetCache远程缓存
+        // 更新远程缓存
         jetcacheRemote.put(key, value);
+        log.info("All caches updated for key: {}", key);
     }
 
     /**
@@ -165,19 +140,11 @@ public class CacheConsistencyManager {
      * @param key 缓存键
      */
     private void clearAllCaches(String key) {
-        // 清除Redis
-        redisTemplate.delete(key);
-        
-        // 清除Caffeine缓存
-        org.springframework.cache.Cache caffeineCache = caffeineCacheManager.getCache("default");
-        if (caffeineCache != null) {
-            caffeineCache.evict(key);
-        }
-        
-        // 清除JetCache本地缓存
+        // 清除本地缓存
         jetcacheLocal.remove(key);
-        // 清除JetCache远程缓存
+        // 清除远程缓存
         jetcacheRemote.remove(key);
+        log.info("All caches cleared for key: {}", key);
     }
 
     /**
@@ -189,67 +156,28 @@ public class CacheConsistencyManager {
     private void publishCacheUpdateMessage(String key, String operation) {
         CacheUpdateMessage message = new CacheUpdateMessage(key, operation);
         redisTemplate.convertAndSend(UPDATE_TOPIC, message);
+        log.info("Published cache {} message for key: {}", operation, key);
     }
 
     /**
      * 获取缓存值
+     * 先从本地缓存获取，如果没有则从远程缓存获取
      * 
      * @param key 缓存键
-     * @param cacheType 缓存类型
      * @return 缓存值
      */
-    public Object get(String key, String cacheType) {
+    public Object get(String key) {
         // 先从本地缓存获取
         Object value = jetcacheLocal.get(key);
-        if (value != null) {
-            return value;
-        }
-
-        // 从Caffeine缓存获取
-        org.springframework.cache.Cache caffeineCache = caffeineCacheManager.getCache(cacheType);
-        if (caffeineCache != null) {
-            org.springframework.cache.Cache.ValueWrapper wrapper = caffeineCache.get(key);
-            if (wrapper != null) {
-                return wrapper.get();
+        if (value == null) {
+            // 本地缓存未命中，从远程缓存获取
+            value = jetcacheRemote.get(key);
+            if (value != null) {
+                // 将远程缓存的值放入本地缓存
+                jetcacheLocal.put(key, value);
+                log.info("Cache value fetched from remote and stored in local cache for key: {}", key);
             }
         }
-
-        // 从Redis获取
-        value = redisTemplate.opsForValue().get(key);
-        if (value != null) {
-            // 回填本地缓存
-            updateAllCaches(key, value);
-        }
-
         return value;
-    }
-
-    /**
-     * 清除缓存
-     * 
-     * @param key 缓存键
-     * @param cacheType 缓存类型
-     */
-    public void evict(String key, String cacheType) {
-        // 获取分布式锁
-        RLock lock = redissonClient.getLock(LOCK_PREFIX + key);
-        try {
-            // 尝试获取锁
-            if (lock.tryLock(5, 30, TimeUnit.SECONDS)) {
-                try {
-                    // 清除各级缓存
-                    clearAllCaches(key);
-                    // 发布缓存删除消息
-                    publishCacheUpdateMessage(key, "delete");
-                } finally {
-                    // 释放锁
-                    lock.unlock();
-                }
-            }
-        } catch (InterruptedException e) {
-            // 获取锁失败，记录日志并中断线程
-            log.error("获取锁失败", e);
-            Thread.currentThread().interrupt();
-        }
     }
 }
